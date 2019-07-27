@@ -196,14 +196,13 @@ func Listen(stype, inst uint32) (*Listener, error) {
 		return nil, xerrors.Errorf("listen: %w", errno)
 	}
 
+	if err := unblockfd(sock); err != nil {
+		return nil, err
+	}
+
 	conn, err := newConn(sock)
 	if err != nil {
 		return nil, xerrors.Errorf("listen: %w", err)
-	}
-
-	if err := unblock(conn.sc); err != nil {
-		conn.Close()
-		return nil, err
 	}
 
 	return &Listener{conn: conn}, nil
@@ -238,13 +237,12 @@ func (l *Listener) Accept() (*Conn, error) {
 		return nil, xerrors.Errorf("accept: %w", errno)
 	}
 
-	c, err := newConn(int(newfd))
-	if err != nil {
+	if err := unblockfd(int(newfd)); err != nil {
 		return nil, err
 	}
 
-	if err := unblock(c.sc); err != nil {
-		c.Close()
+	c, err := newConn(int(newfd))
+	if err != nil {
 		return nil, err
 	}
 
@@ -440,17 +438,16 @@ func DialService(stype, inst uint32) (*Conn, error) {
 		Instance: inst,
 	}
 
-	c, err := newConn(fd)
-	if err != nil {
-		return nil, err
-	}
-
 	if _, _, errno := syscall.Syscall(syscall.SYS_CONNECT, uintptr(fd), uintptr(unsafe.Pointer(addr)), uintptr(sockaddrSize)); errno != 0 {
 		return nil, xerrors.Errorf("connect: %w", errno)
 	}
 
-	if err := unblock(c.sc); err != nil {
-		c.Close()
+	if err := unblockfd(fd); err != nil {
+		return nil, err
+	}
+
+	c, err := newConn(fd)
+	if err != nil {
 		return nil, err
 	}
 
@@ -531,6 +528,10 @@ func Topology() (*TopologyConn, error) {
 	}
 
 	return &TopologyConn{conn: c}, nil
+}
+
+func unblockfd(fd int) error {
+	return syscall.SetNonblock(fd, true)
 }
 
 func unblock(sc syscall.RawConn) (err error) {
