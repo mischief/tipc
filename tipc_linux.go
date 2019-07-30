@@ -15,8 +15,6 @@ import (
 	"golang.org/x/xerrors"
 )
 
-//go:generate stringer -type=EventType
-
 const (
 	sockaddrSize = 16
 
@@ -51,58 +49,6 @@ const (
 
 	WaitForever = ^uint32(0)
 )
-
-type Subscription struct {
-	NameSeq
-	Timeout uint32
-	Filter  uint32
-	Usr     [8]byte
-}
-
-func (s *Subscription) MarshalBinary() (b []byte, err error) {
-	b = make([]byte, binary.Size(s))
-
-	be := binary.BigEndian
-	be.PutUint32(b[0:], s.Type)
-	be.PutUint32(b[4:], s.Lower)
-	be.PutUint32(b[8:], s.Upper)
-	be.PutUint32(b[12:], s.Timeout)
-	be.PutUint32(b[16:], s.Filter)
-	copy(b[20:], s.Usr[:])
-
-	return b, nil
-}
-
-type EventType uint32
-
-const (
-	Published EventType = iota + 1
-	Withdrawn
-	Timeout
-)
-
-type Event struct {
-	Event EventType
-	Lower uint32
-	Upper uint32
-	Port
-	Subscription Subscription
-}
-
-func (e *Event) UnmarshalBinary(b []byte) error {
-	if len(b) != binary.Size(e) {
-		return errors.New("short event")
-	}
-
-	be := binary.BigEndian
-	e.Event = EventType(be.Uint32(b[0:]))
-	e.Lower = be.Uint32(b[4:])
-	e.Upper = be.Uint32(b[8:])
-	e.Port.Ref = be.Uint32(b[12:])
-	e.Port.Node = be.Uint32(b[16:])
-
-	return nil
-}
 
 // shared sockaddr data
 type Sockaddr struct {
@@ -452,82 +398,6 @@ func DialService(stype, inst uint32) (*Conn, error) {
 	}
 
 	return c, nil
-}
-
-/*
-func TIPCDial() (*Conn, error) {
-	fd, err := socket(syscall.SOCK_SEQPACKET)
-	if err != nil {
-		return nil, err
-	}
-
-	sockaddr := Sockaddr{
-		Family:   syscall.AF_TIPC,
-		AddrType: ServiceAddr,
-	}
-
-	addr := &Service{
-		Sockaddr: sockaddr,
-		Type:     TopSrv,
-		Instance: TopSrv,
-	}
-
-	//fmt.Printf("%d\n", unsafe.Sizeof(*addr))
-
-	var syserr error
-
-	_, _, e1 := syscall.Syscall(syscall.SYS_CONNECT, uintptr(fd), uintptr(unsafe.Pointer(addr)), uintptr(sockaddrSize))
-	if e1 != 0 {
-		syserr = e1
-		return nil, syserr
-	}
-
-	return &Conn{fd: fd}, nil
-}
-*/
-
-type TopologyConn struct {
-	conn *Conn
-}
-
-func (tc *TopologyConn) Subscribe(s *Subscription) error {
-	buf, err := s.MarshalBinary()
-	if err != nil {
-		return err
-	}
-
-	if _, err := tc.conn.Write(buf); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (tc *TopologyConn) ReadEvent() (*Event, error) {
-	var evt Event
-	evtbuf := make([]byte, binary.Size(evt))
-	if _, err := tc.conn.Read(evtbuf); err != nil {
-		return nil, err
-	}
-
-	if err := evt.UnmarshalBinary(evtbuf); err != nil {
-		return nil, err
-	}
-
-	return &evt, nil
-}
-
-func (tc *TopologyConn) Close() error {
-	return tc.conn.Close()
-}
-
-func Topology() (*TopologyConn, error) {
-	c, err := DialService(TopSrv, TopSrv)
-	if err != nil {
-		return nil, err
-	}
-
-	return &TopologyConn{conn: c}, nil
 }
 
 func unblockfd(fd int) error {

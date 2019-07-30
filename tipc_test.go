@@ -1,7 +1,6 @@
 package tipc
 
 import (
-	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
@@ -11,52 +10,6 @@ import (
 	"golang.org/x/net/nettest"
 	"golang.org/x/sync/errgroup"
 )
-
-func TestTopologySubscribe(t *testing.T) {
-	c, err := DialService(TopSrv, TopSrv)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	defer c.Close()
-
-	sub := &Subscription{
-		NameSeq: NameSeq{
-			Type:  18888,
-			Lower: 17,
-			Upper: 17,
-		},
-		Timeout: 1000,
-		Filter:  SubService,
-	}
-
-	buf, err := sub.MarshalBinary()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := c.Write(buf); err != nil {
-		t.Fatal(err)
-	}
-
-	evt := &Event{}
-
-	evtbuf := make([]byte, binary.Size(evt))
-
-	if _, err := c.Read(evtbuf); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := evt.UnmarshalBinary(evtbuf); err != nil {
-		t.Fatal(err)
-	}
-
-	t.Logf("evt: %#v", evt)
-
-	if err := c.Close(); err != nil {
-		t.Fatal(err)
-	}
-}
 
 func TestListen(t *testing.T) {
 	var g errgroup.Group
