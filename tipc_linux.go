@@ -250,11 +250,38 @@ func (tc *Conn) Recvmsg(b []byte) (int, error) {
 }
 
 func (tc *Conn) Read(b []byte) (n int, err error) {
-	return tc.fil.Read(b)
+	n, err = tc.fil.Read(b)
+
+	if err != nil {
+		operr := &net.OpError{
+			Op:     "read",
+			Net:    "tipc",
+			Source: tc.LocalAddr(),
+			Addr:   tc.RemoteAddr(),
+			Err:    err,
+		}
+		return 0, operr
+	}
+
+	return
 }
 
 func (tc *Conn) Write(b []byte) (n int, err error) {
-	return tc.fil.Write(b)
+	n, err = tc.fil.Write(b)
+
+	if err != nil {
+		operr := &net.OpError{
+			Op:     "write",
+			Net:    "tipc",
+			Source: tc.LocalAddr(),
+			Addr:   tc.RemoteAddr(),
+			Err:    err,
+		}
+
+		return 0, operr
+	}
+
+	return
 }
 
 func (tc *Conn) Close() (err error) {
@@ -346,18 +373,6 @@ func DialService(stype, inst uint32) (*Conn, error) {
 
 func unblockfd(fd int) error {
 	return syscall.SetNonblock(fd, true)
-}
-
-func unblock(sc syscall.RawConn) (err error) {
-	cerr := sc.Control(func(fd uintptr) {
-		err = syscall.SetNonblock(int(fd), true)
-	})
-
-	if cerr != nil {
-		err = cerr
-	}
-
-	return
 }
 
 func socket(typ int) (int, error) {
