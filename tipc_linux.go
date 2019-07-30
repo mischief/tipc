@@ -250,67 +250,11 @@ func (tc *Conn) Recvmsg(b []byte) (int, error) {
 }
 
 func (tc *Conn) Read(b []byte) (n int, err error) {
-	var errno syscall.Errno
-
-	cerr := tc.sc.Read(func(fd uintptr) bool {
-		var nn uintptr
-		fmt.Printf("conn read start fd=%v len=%d\n", int(fd), len(b))
-		nn, _, errno = syscall.Syscall6(syscall.SYS_READ, fd, uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)), 0, 0, 0)
-		//nn, _, errno = syscall.Syscall6(syscall.SYS_RECVFROM, fd, uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)), 0, 0, 0)
-		n = int(nn)
-
-		fmt.Printf("conn read ret fd=%v n=%v errno=%v\n", int(fd), n, errno)
-
-		switch errno {
-		case syscall.EAGAIN:
-			return false
-		default:
-			return true
-		}
-	})
-
-	if cerr != nil {
-		fmt.Printf("conn read fd=%d cerr=%v\n", tc.fd, cerr)
-		return 0, cerr
-	}
-
-	if errno != 0 {
-		return 0, errno
-	}
-
-	fmt.Printf("conn read success n=%d %q\n", n, b[:n])
-
-	return n, nil
+	return tc.fil.Read(b)
 }
 
 func (tc *Conn) Write(b []byte) (n int, err error) {
-	var errno syscall.Errno
-
-	cerr := tc.sc.Write(func(fd uintptr) bool {
-		var nn uintptr
-		//fmt.Printf("conn writ start fd=%v len=%d %q\n", int(fd), len(b), b)
-		nn, _, errno = syscall.Syscall6(syscall.SYS_SENDTO, fd, uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)), 0, 0, 0)
-		n = int(nn)
-		//fmt.Printf("conn writ ret fd=%v n=%v errno=%v\n", int(fd), n, errno)
-
-		switch errno {
-		case syscall.EAGAIN, syscall.ENOTCONN:
-			return false
-		}
-
-		return true
-	})
-
-	if cerr != nil {
-		//fmt.Printf("conn read fd=%d cerr=%v\n", tc.fd, cerr)
-		return 0, cerr
-	}
-
-	if errno != 0 {
-		return 0, err
-	}
-
-	return n, nil
+	return tc.fil.Write(b)
 }
 
 func (tc *Conn) Close() (err error) {
