@@ -5,11 +5,12 @@ import (
 	"errors"
 
 	"github.com/mischief/tipc"
+	"golang.org/x/sys/unix"
 )
 
 type Subscription struct {
-	tipc.NameSeq
-	Timeout uint32
+	unix.TIPCServiceRange
+	Timeout int32
 	Filter  uint32
 
 	// space for a user pointer - likely not needed in go.
@@ -23,10 +24,31 @@ func (s *Subscription) MarshalBinary() (b []byte, err error) {
 	be.PutUint32(b[0:], s.Type)
 	be.PutUint32(b[4:], s.Lower)
 	be.PutUint32(b[8:], s.Upper)
-	be.PutUint32(b[12:], s.Timeout)
+	be.PutUint32(b[12:], uint32(s.Timeout))
 	be.PutUint32(b[16:], s.Filter)
 
 	return b, nil
+}
+
+func (s *Subscription) UnmarshalBinary(b []byte) error {
+	if len(b) != binary.Size(s) {
+		return errors.New("short event")
+	}
+
+	be := binary.BigEndian
+
+	sr := &s.TIPCServiceRange
+
+	sr.Type = be.Uint32(b[0:])
+	sr.Lower = be.Uint32(b[4:])
+	sr.Upper = be.Uint32(b[8:])
+
+	s.Timeout = int32(be.Uint32(b[12:]))
+	s.Filter = be.Uint32(b[16:])
+
+	copy(s._usr[:], b[20:])
+
+	return nil
 }
 
 //go:generate stringer -type=EventType
@@ -43,7 +65,7 @@ type Event struct {
 	Event EventType
 	Lower uint32
 	Upper uint32
-	tipc.Port
+	unix.TIPCSocketAddr
 	Subscription Subscription
 }
 
@@ -56,10 +78,11 @@ func (e *Event) UnmarshalBinary(b []byte) error {
 	e.Event = EventType(be.Uint32(b[0:]))
 	e.Lower = be.Uint32(b[4:])
 	e.Upper = be.Uint32(b[8:])
-	e.Port.Ref = be.Uint32(b[12:])
-	e.Port.Node = be.Uint32(b[16:])
 
-	return nil
+	e.TIPCSocketAddr.Ref = be.Uint32(b[12:])
+	e.TIPCSocketAddr.Node = be.Uint32(b[16:])
+
+	return e.Subscription.UnmarshalBinary(b[20:])
 }
 
 type TopologyConn struct {
@@ -97,8 +120,22 @@ func (tc *TopologyConn) Close() error {
 	return tc.conn.Close()
 }
 
-func Topology() (*TopologyConn, error) {
-	c, err := tipc.DialService(tipc.TopSrv, tipc.TopSrv)
+// Topology server connection. Pass 0 as node for self.
+func Topology(node uint32) (*TopologyConn, error) {
+	sa := &unix.SockaddrTIPCAddrName{
+		Name: unix.TIPCServiceAddr{
+			Type:     1,
+			Instance: 1,
+		},
+		Domain: node,
+	}
+
+	st := &unix.SockaddrTIPC{
+		//Scope: unix.TIPC_CLUSTER_SCOPE,
+		Addr: sa,
+	}
+
+	c, err := tipc.DialSequentialPacket(st)
 	if err != nil {
 		return nil, err
 	}

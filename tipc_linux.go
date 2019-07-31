@@ -1,46 +1,21 @@
 package tipc
 
 import (
-	"encoding/binary"
-	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
-	"reflect"
 	"sync"
 	"syscall"
 	"time"
-	"unsafe"
 
+	"golang.org/x/sys/unix"
 	"golang.org/x/xerrors"
 )
 
 const (
-	sockaddrSize = 16
-
-	// AddrTypes
-	ServiceRange = 1
-	ServiceAddr  = 2
-	SocketAddr   = 3
-
-	// Scopes
-	ScopeZone    = 1
-	ScopeCluster = 2
-	ScopeNode    = 3
-
 	TopSrv = 1
 )
-
-type Port struct {
-	Ref  uint32
-	Node uint32
-}
-
-type NameSeq struct {
-	Type  uint32
-	Lower uint32
-	Upper uint32
-}
 
 const (
 	SubPorts   = 1
@@ -50,99 +25,40 @@ const (
 	WaitForever = ^uint32(0)
 )
 
-// shared sockaddr data
-type Sockaddr struct {
-	Family   uint16
-	AddrType uint8
-	Scope    int8
+type Addr struct {
+	unix.Sockaddr
 }
 
-func (s *Sockaddr) Network() string {
+func (a *Addr) Network() string {
 	return "tipc"
 }
 
-func (s *Sockaddr) UnmarshalBinary(b []byte) error {
-	if len(b) < binary.Size(s) {
-		return errors.New("short sockaddr")
-	}
-
-	be := binary.BigEndian
-	s.Family = be.Uint16(b[0:])
-	s.AddrType = b[2]
-	s.Scope = int8(b[3])
-
-	return nil
+func (a *Addr) String() string {
+	return fmt.Sprintf("%T %+v", a.Sockaddr, a.Sockaddr)
 }
 
-type Service struct {
-	Sockaddr
-	Type     uint32
-	Instance uint32
-	Domain   uint32
-}
-
-/*
-type ServiceRange struct {
-	Sockaddr
-	NameSeq
-}
-*/
-
-type Peer struct {
-	Sockaddr
-	Instance uint32
-	Node     uint32
-
-	pad [4]byte
-}
-
-func (p *Peer) UnmarshalBinary(b []byte) error {
-	if len(b) < binary.Size(p) {
-		return errors.New("short peer")
-	}
-
-	if err := p.Sockaddr.UnmarshalBinary(b); err != nil {
-		return err
-	}
-
-	b = b[4:]
-
-	be := binary.BigEndian
-	p.Instance = be.Uint32(b[0:])
-	p.Node = be.Uint32(b[4:])
-
-	return nil
-}
-
-func (p *Peer) String() string {
-	return fmt.Sprintf("{%x,%x}", p.Instance, p.Node)
-}
-
-func Listen(stype, inst uint32) (*Listener, error) {
-	serv := &Service{
-		Sockaddr: Sockaddr{
-			Family:   syscall.AF_TIPC,
-			AddrType: ServiceAddr,
-			Scope:    ScopeZone,
-		},
-		Type:     stype,
-		Instance: inst,
-	}
-
-	sock, err := socket(syscall.SOCK_STREAM)
+func Listen(scope int, s *unix.TIPCServiceRange) (*Listener, error) {
+	sock, err := unix.Socket(unix.AF_TIPC, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
 	if err != nil {
 		return nil, xerrors.Errorf("socket: %w", err)
 	}
 
-	if _, _, errno := syscall.Syscall(syscall.SYS_BIND, uintptr(sock), uintptr(unsafe.Pointer(serv)), uintptr(sockaddrSize)); errno != 0 {
-		return nil, xerrors.Errorf("bind: %w", errno)
+	sa := &unix.SockaddrTIPC{
+		Scope: scope,
+		Addr:  s,
 	}
 
-	if _, _, errno := syscall.Syscall(syscall.SYS_LISTEN, uintptr(sock), 0, 0); errno != 0 {
-		return nil, xerrors.Errorf("listen: %w", errno)
+	if err := unix.Bind(sock, sa); err != nil {
+		unix.Close(sock)
+		return nil, err
 	}
 
-	if err := unblockfd(sock); err != nil {
+	if err := unix.Listen(sock, 32); err != nil {
+		unix.Close(sock)
+		return nil, err
+	}
+
+	if err := unix.SetNonblock(sock, true); err != nil {
 		return nil, err
 	}
 
@@ -158,32 +74,28 @@ type Listener struct {
 	conn *Conn
 }
 
-func (l *Listener) Accept() (*Conn, error) {
+func (l *Listener) Accept() (net.Conn, error) {
 	var (
-		newfd uintptr
-		errno syscall.Errno
+		newfd int
+		err   error
+		sa    unix.Sockaddr
 	)
 
 	cerr := l.conn.sc.Read(func(fd uintptr) bool {
-		newfd, _, errno = syscall.Syscall(syscall.SYS_ACCEPT, fd, 0, 0)
-		//fmt.Printf("accept %d = %d, %v\n", int(fd), int(newfd), errno)
-		switch errno {
-		case syscall.EAGAIN:
-			return false
-		}
+		newfd, sa, err = unix.Accept(int(fd))
 
-		return true
+		return !xerrors.Is(err, unix.EAGAIN)
 	})
 
 	if cerr != nil {
-		return nil, xerrors.Errorf("accept: %w", cerr)
+		return nil, cerr
 	}
 
-	if errno != 0 {
-		return nil, xerrors.Errorf("accept: %w", errno)
+	if err != nil {
+		return nil, err
 	}
 
-	if err := unblockfd(int(newfd)); err != nil {
+	if err := unix.SetNonblock(int(newfd), true); err != nil {
 		return nil, err
 	}
 
@@ -191,6 +103,8 @@ func (l *Listener) Accept() (*Conn, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	c.remote = &Addr{sa}
 
 	return c, nil
 }
@@ -208,12 +122,17 @@ type Conn struct {
 	fil       *os.File
 	sc        syscall.RawConn
 	closeOnce sync.Once
+
+	addrmu sync.Mutex
+	local  *Addr
+	remote *Addr
 }
 
 func newConn(fd int) (*Conn, error) {
 	fil := os.NewFile(uintptr(fd), "tipc")
 	sc, err := fil.SyscallConn()
 	if err != nil {
+		fil.Close()
 		return nil, err
 	}
 
@@ -224,35 +143,20 @@ func (c *Conn) String() string {
 	return fmt.Sprintf("%s -> %s", c.LocalAddr(), c.RemoteAddr())
 }
 
-func (tc *Conn) Recvmsg(b []byte) (int, error) {
-	var (
-		msg syscall.Msghdr
-		iov syscall.Iovec
-	)
-
-	iov.Base = &b[0]
-	iov.SetLen(len(b))
-
-	buf := make([]byte, sockaddrSize*2)
-
-	msg.Name = &buf[0]
-	msg.Namelen = sockaddrSize * 2
-
-	msg.Iov = &iov
-	msg.Iovlen = 1
-
-	rv, _, errno := syscall.Syscall(syscall.SYS_RECVMSG, uintptr(tc.fd), uintptr(unsafe.Pointer(&msg)), 0)
-	if errno != 0 {
-		return 0, errno
-	}
-
-	return int(rv), nil
-}
-
 func (tc *Conn) Read(b []byte) (n int, err error) {
 	n, err = tc.fil.Read(b)
 
 	if err != nil {
+		switch xerr := err.(type) {
+		case *os.PathError:
+			// XXX: io.Copy and friends expect io.EOF to cleanly
+			// terminate, and tipc seems to indicate that with
+			// ECONNRESET...
+			if xerr.Err == syscall.ECONNRESET {
+				return n, io.EOF
+			}
+		}
+
 		operr := &net.OpError{
 			Op:     "read",
 			Net:    "tipc",
@@ -260,7 +164,8 @@ func (tc *Conn) Read(b []byte) (n int, err error) {
 			Addr:   tc.RemoteAddr(),
 			Err:    err,
 		}
-		return 0, operr
+
+		return n, operr
 	}
 
 	return
@@ -284,46 +189,73 @@ func (tc *Conn) Write(b []byte) (n int, err error) {
 	return
 }
 
+func (tc *Conn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
+	// TODO: finish.
+	var (
+		iov unix.Iovec
+		msg unix.Msghdr
+		//sa        unix.RawSockaddrTIPC
+		ancillary []byte
+	)
+
+	ancillary = make([]byte, unix.CmsgSpace(8)+unix.CmsgSpace(1024)+unix.CmsgSpace(16))
+
+	iov.Base = &p[0]
+	iov.SetLen(len(p))
+
+	msg.Iov = &iov
+	msg.Iovlen = 1
+
+	msg.Control = &ancillary[0]
+	msg.SetControllen(len(ancillary))
+
+	return 0, nil, nil
+}
+
+func (tc *Conn) WriteTo(p []byte, addr Addr) (n int, err error) {
+	// TODO: implement.
+	return 0, nil
+}
+
 func (tc *Conn) Close() (err error) {
-	fmt.Printf("conn close %d\n", tc.fd)
 	return tc.fil.Close()
 }
 
-func sockname(fd int, trap uintptr) (*Peer, error) {
-	b := make([]byte, sockaddrSize)
-	sh := (*reflect.SliceHeader)(unsafe.Pointer(&b))
-	var sz int
-	sz = sh.Len
-	_, _, errno := syscall.Syscall(trap, uintptr(fd), sh.Data, uintptr(unsafe.Pointer(&sz)))
-	if errno != 0 {
-		return nil, errno
-	}
-
-	var p Peer
-
-	if err := p.UnmarshalBinary(b); err != nil {
-		return nil, err
-	}
-
-	return &p, nil
-}
-
 func (tc *Conn) LocalAddr() net.Addr {
-	p, err := sockname(tc.fd, syscall.SYS_GETSOCKNAME)
+	tc.addrmu.Lock()
+	defer tc.addrmu.Unlock()
+
+	if tc.local != nil {
+		return tc.local
+	}
+
+	sa, err := unix.Getsockname(tc.fd)
 	if err != nil {
 		return nil
 	}
+	tc.local = &Addr{sa}
 
-	return p
+	return tc.local
+
+	return &Addr{sa}
 }
 
 func (tc *Conn) RemoteAddr() net.Addr {
-	p, err := sockname(tc.fd, syscall.SYS_GETPEERNAME)
+	tc.addrmu.Lock()
+	defer tc.addrmu.Unlock()
+
+	if tc.remote != nil {
+		return tc.remote
+	}
+
+	sa, err := unix.Getpeername(tc.fd)
 	if err != nil {
 		return nil
 	}
 
-	return p
+	tc.remote = &Addr{sa}
+
+	return tc.remote
 }
 
 func (tc *Conn) SetDeadline(t time.Time) error {
@@ -338,69 +270,87 @@ func (tc *Conn) SetWriteDeadline(t time.Time) error {
 	return tc.fil.SetWriteDeadline(t)
 }
 
-func DialService(stype, inst uint32) (*Conn, error) {
-	fd, err := socket(syscall.SOCK_STREAM)
+func newConnectConn(typ int, s *unix.SockaddrTIPC) (*Conn, error) {
+	fd, err := unix.Socket(unix.AF_TIPC, typ|unix.SOCK_CLOEXEC, 0)
 	if err != nil {
 		return nil, err
 	}
 
-	sockaddr := Sockaddr{
-		Family:   syscall.AF_TIPC,
-		AddrType: ServiceAddr,
-	}
-
-	addr := &Service{
-		Sockaddr: sockaddr,
-		Type:     stype,
-		Instance: inst,
-	}
-
-	if _, _, errno := syscall.Syscall(syscall.SYS_CONNECT, uintptr(fd), uintptr(unsafe.Pointer(addr)), uintptr(sockaddrSize)); errno != 0 {
-		return nil, xerrors.Errorf("connect: %w", errno)
-	}
-
-	if err := unblockfd(fd); err != nil {
+	if err := unix.Connect(fd, s); err != nil {
+		unix.Close(fd)
 		return nil, err
 	}
 
-	c, err := newConn(fd)
+	if err := unix.SetNonblock(fd, true); err != nil {
+		unix.Close(fd)
+		return nil, err
+	}
+
+	return newConn(fd)
+}
+
+func DialSequentialPacket(s *unix.SockaddrTIPC) (*Conn, error) {
+	return newConnectConn(unix.SOCK_SEQPACKET, s)
+}
+
+func DialStream(s *unix.SockaddrTIPC) (*Conn, error) {
+	return newConnectConn(unix.SOCK_STREAM, s)
+}
+
+func newPacketConn(typ int, s *unix.SockaddrTIPC) (*Conn, error) {
+	fd, err := unix.Socket(unix.AF_TIPC, typ|unix.SOCK_CLOEXEC, 0)
 	if err != nil {
 		return nil, err
 	}
 
-	return c, nil
+	if err := unix.SetNonblock(fd, true); err != nil {
+		unix.Close(fd)
+		return nil, err
+	}
+
+	return newConn(fd)
 }
 
-func unblockfd(fd int) error {
-	return syscall.SetNonblock(fd, true)
+func ListenReliableDatagram(s *unix.SockaddrTIPC) (*Conn, error) {
+	return newPacketConn(unix.SOCK_RDM, s)
+}
+func ListenDatagram(s *unix.SockaddrTIPC) (*Conn, error) {
+	return newPacketConn(unix.SOCK_DGRAM, s)
 }
 
-func socket(typ int) (int, error) {
-	fd, err := syscall.Socket(syscall.AF_TIPC, typ, 0)
+// SocketPair returns two AF_TIPC connections connected to each other through
+// the local node. They are created as SOCK_SEQPACKET sockets.
+func SocketPair() (c1, c2 *Conn, err error) {
+	fds, err := unix.Socketpair(unix.AF_TIPC, unix.SOCK_SEQPACKET|syscall.SOCK_CLOEXEC, 0)
 	if err != nil {
-		return -1, err
+		return nil, nil, err
 	}
 
-	return fd, err
-}
+	if err := unix.SetNonblock(fds[0], true); err != nil {
+		unix.Close(fds[0])
+		unix.Close(fds[1])
+		return nil, nil, err
+	}
 
-func socketpair(typ int) (fds [2]int, err error) {
-	fds, err = syscall.Socketpair(syscall.AF_TIPC, typ, 0)
+	if err := unix.SetNonblock(fds[1], true); err != nil {
+		unix.Close(fds[0])
+		unix.Close(fds[1])
+		return nil, nil, err
+	}
+
+	c1, err = newConn(fds[0])
 	if err != nil {
-		return
+		unix.Close(fds[0])
+		unix.Close(fds[1])
+		return nil, nil, err
 	}
 
-	if err = syscall.SetNonblock(fds[0], true); err != nil {
-		syscall.Close(fds[0])
-		syscall.Close(fds[1])
-		return
+	c2, err = newConn(fds[1])
+	if err != nil {
+		unix.Close(fds[1])
+		c1.Close()
+		return nil, nil, err
 	}
 
-	if err = syscall.SetNonblock(fds[1], true); err != nil {
-		syscall.Close(fds[0])
-		syscall.Close(fds[1])
-		return
-	}
-
-	return fds, nil
+	return
 }

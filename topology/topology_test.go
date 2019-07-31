@@ -3,11 +3,11 @@ package topology
 import (
 	"testing"
 
-	"github.com/mischief/tipc"
+	"golang.org/x/sys/unix"
 )
 
 func TestTopologySubscribe(t *testing.T) {
-	c, err := Topology()
+	c, err := Topology(0)
 	if err != nil {
 		t.Error(err)
 	}
@@ -15,13 +15,9 @@ func TestTopologySubscribe(t *testing.T) {
 	defer c.Close()
 
 	sub := &Subscription{
-		NameSeq: tipc.NameSeq{
-			Type:  18888,
-			Lower: 17,
-			Upper: 17,
-		},
-		Timeout: 1000,
-		Filter:  tipc.SubService,
+		TIPCServiceRange: unix.TIPCServiceRange{Type: 1, Lower: 0, Upper: ^uint32(0)},
+		Timeout:          1000,
+		Filter:           unix.TIPC_SUB_SERVICE,
 	}
 
 	if err := c.Subscribe(sub); err != nil {
@@ -33,5 +29,5 @@ func TestTopologySubscribe(t *testing.T) {
 		t.Error(err)
 	}
 
-	t.Logf("event: %v", evt)
+	t.Logf("event: %+v", evt)
 }

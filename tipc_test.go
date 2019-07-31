@@ -2,98 +2,21 @@ package tipc
 
 import (
 	"fmt"
-	"io"
 	"net"
 	"testing"
-	"time"
 
 	"golang.org/x/net/nettest"
-	"golang.org/x/sync/errgroup"
+	"golang.org/x/sys/unix"
 )
 
-func TestListen(t *testing.T) {
-	var g errgroup.Group
-
-	serv, inst := uint32(100), uint32(10)
-
-	die := make(chan int)
-
-	g.Go(func() error {
-		c, err := DialService(serv, inst)
-		if err != nil {
-			fmt.Printf("dial: %v\n", err)
-			return err
-		}
-
-		defer func() {
-			if cerr := c.Close(); err != nil {
-				fmt.Printf("close: %v\n", err)
-				err = cerr
-			}
-		}()
-
-		fmt.Printf("conn: %s\n", c)
-
-		_, err = io.WriteString(c, "hello!")
-		fmt.Printf("write: %v\n", err)
-
-		<-die
-
-		return err
-	})
-
-	defer func() {
-		if err := g.Wait(); err != nil {
-			t.Error(err)
-		}
-	}()
-
-	defer close(die)
-
-	l, err := Listen(100, 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	t.Logf("listening on %s", l.Addr())
-
-	defer func() {
-		if err := l.Close(); err != nil {
-			t.Error(err)
-		}
-	}()
-
-	c, err := l.Accept()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	defer func() {
-		if err := c.Close(); err != nil {
-			t.Error(err)
-		}
-	}()
-
-	buf := make([]byte, 128)
-
-	if err := c.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
-		t.Fatal(err)
-	}
-
-	fmt.Printf("gonna read %v\n", c)
-
-	n, err := c.Recvmsg(buf)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	buf = buf[:n]
-
-	t.Logf("read %d: len(buf)=%d %s", n, len(buf), buf)
-}
-
 func pipemaker() (c1, c2 net.Conn, stop func(), err error) {
-	l, err := Listen(999, 999)
+	sr := &unix.TIPCServiceRange{
+		Type:  999,
+		Lower: 0,
+		Upper: ^uint32(0),
+	}
+
+	l, err := Listen(unix.TIPC_CLUSTER_SCOPE, sr)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -110,7 +33,20 @@ func pipemaker() (c1, c2 net.Conn, stop func(), err error) {
 		close(ready)
 	}()
 
-	c1, err = DialService(999, 999)
+	sa := &unix.SockaddrTIPCAddrName{
+		Name: unix.TIPCServiceAddr{
+			Type:     999,
+			Instance: 0,
+		},
+		Domain: 0,
+	}
+
+	st := &unix.SockaddrTIPC{
+		Scope: unix.TIPC_CLUSTER_SCOPE,
+		Addr:  sa,
+	}
+
+	c1, err = DialStream(st)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -126,12 +62,24 @@ func pipemaker() (c1, c2 net.Conn, stop func(), err error) {
 	return
 }
 
-/*
-func sockpairmaker() (c1, c2 net.Conn, stop func(), err error) {
-	socketpair(syscall.SOCK_STREAM)
-}
-*/
-
 func TestNetConn(t *testing.T) {
 	nettest.TestConn(t, pipemaker)
+}
+
+func TestSocketPair(t *testing.T) {
+	socketpair := func() (net.Conn, net.Conn, func(), error) {
+		c1, c2, err := SocketPair()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		stop := func() {
+			c2.Close()
+			c1.Close()
+		}
+
+		return c1, c2, stop, nil
+	}
+
+	nettest.TestConn(t, socketpair)
 }
