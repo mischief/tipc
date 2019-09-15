@@ -14,10 +14,10 @@ func TestTopologySubscribe(t *testing.T) {
 
 	defer c.Close()
 
-	sub := &Subscription{
-		TIPCServiceRange: unix.TIPCServiceRange{Type: 1, Lower: 0, Upper: ^uint32(0)},
-		Timeout:          1000,
-		Filter:           unix.TIPC_SUB_SERVICE,
+	sub := &unix.TIPCSubscr{
+		Seq:     unix.TIPCServiceRange{Type: 1, Lower: 0, Upper: ^uint32(0)},
+		Timeout: 1000,
+		Filter:  unix.TIPC_SUB_SERVICE,
 	}
 
 	if err := c.Subscribe(sub); err != nil {

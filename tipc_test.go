@@ -1,7 +1,6 @@
 package tipc
 
 import (
-	"fmt"
 	"net"
 	"testing"
 
@@ -27,18 +26,15 @@ func pipemaker() (c1, c2 net.Conn, stop func(), err error) {
 		var aerr error
 		c2, aerr = l.Accept()
 		if aerr != nil {
-			fmt.Println(err)
 			panic(aerr)
 		}
 		close(ready)
 	}()
 
-	sa := &unix.SockaddrTIPCAddrName{
-		Name: unix.TIPCServiceAddr{
-			Type:     999,
-			Instance: 0,
-		},
-		Domain: 0,
+	sa := &unix.TIPCServiceName{
+		Type:     999,
+		Instance: 0,
+		Domain:   0,
 	}
 
 	st := &unix.SockaddrTIPC{
@@ -55,8 +51,8 @@ func pipemaker() (c1, c2 net.Conn, stop func(), err error) {
 
 	stop = func() {
 		l.Close()
-		c1.Close()
 		c2.Close()
+		c1.Close()
 	}
 
 	return

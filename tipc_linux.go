@@ -1,6 +1,7 @@
 package tipc
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -10,19 +11,6 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
-	"golang.org/x/xerrors"
-)
-
-const (
-	TopSrv = 1
-)
-
-const (
-	SubPorts   = 1
-	SubService = 2
-	SubCancel  = 3
-
-	WaitForever = ^uint32(0)
 )
 
 type Addr struct {
@@ -34,13 +22,22 @@ func (a *Addr) Network() string {
 }
 
 func (a *Addr) String() string {
-	return fmt.Sprintf("%T %+v", a.Sockaddr, a.Sockaddr)
+	ta := a.Sockaddr.(*unix.SockaddrTIPC)
+	switch sa := ta.Addr.(type) {
+	default:
+		panic("unknown addr")
+	case *unix.TIPCSocketAddr:
+		return fmt.Sprintf("port=%d,node=%x", sa.Ref, sa.Node)
+	}
+
+	_ = ta
+	return fmt.Sprintf("%T %+v", ta.Addr, ta.Addr)
 }
 
 func Listen(scope int, s *unix.TIPCServiceRange) (*Listener, error) {
 	sock, err := unix.Socket(unix.AF_TIPC, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
 	if err != nil {
-		return nil, xerrors.Errorf("socket: %w", err)
+		return nil, err
 	}
 
 	sa := &unix.SockaddrTIPC{
@@ -64,7 +61,7 @@ func Listen(scope int, s *unix.TIPCServiceRange) (*Listener, error) {
 
 	conn, err := newConn(sock)
 	if err != nil {
-		return nil, xerrors.Errorf("listen: %w", err)
+		return nil, err
 	}
 
 	return &Listener{conn: conn}, nil
@@ -84,7 +81,7 @@ func (l *Listener) Accept() (net.Conn, error) {
 	cerr := l.conn.sc.Read(func(fd uintptr) bool {
 		newfd, sa, err = unix.Accept(int(fd))
 
-		return !xerrors.Is(err, unix.EAGAIN)
+		return !errors.Is(err, unix.EAGAIN)
 	})
 
 	if cerr != nil {
@@ -147,12 +144,12 @@ func (tc *Conn) Read(b []byte) (n int, err error) {
 	n, err = tc.fil.Read(b)
 
 	if err != nil {
-		switch xerr := err.(type) {
-		case *os.PathError:
+		var perr *os.PathError
+		if errors.As(err, &perr) {
 			// XXX: io.Copy and friends expect io.EOF to cleanly
 			// terminate, and tipc seems to indicate that with
 			// ECONNRESET...
-			if xerr.Err == syscall.ECONNRESET {
+			if perr.Err == syscall.ECONNRESET {
 				return n, io.EOF
 			}
 		}
@@ -190,31 +187,71 @@ func (tc *Conn) Write(b []byte) (n int, err error) {
 }
 
 func (tc *Conn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
-	// TODO: finish.
+	/*
+		// TODO: finish.
+		var (
+			iov unix.Iovec
+			msg unix.Msghdr
+			//sa        unix.RawSockaddrTIPC
+			ancillary []byte
+		)
+
+		ancillary = make([]byte, unix.CmsgSpace(8)+unix.CmsgSpace(1024)+unix.CmsgSpace(16))
+
+		iov.Base = &p[0]
+		iov.SetLen(len(p))
+
+		msg.Iov = &iov
+		msg.Iovlen = 1
+
+		msg.Control = &ancillary[0]
+		msg.SetControllen(len(ancillary))
+
+		return 0, nil, nil
+	*/
 	var (
-		iov unix.Iovec
-		msg unix.Msghdr
-		//sa        unix.RawSockaddrTIPC
-		ancillary []byte
+		nn   int
+		sa   unix.Sockaddr
+		rerr error
 	)
 
-	ancillary = make([]byte, unix.CmsgSpace(8)+unix.CmsgSpace(1024)+unix.CmsgSpace(16))
+	cerr := tc.sc.Read(func(fd uintptr) bool {
+		nn, sa, rerr = unix.Recvfrom(int(fd), p, 0)
+		return !errors.Is(rerr, syscall.EAGAIN)
+	})
 
-	iov.Base = &p[0]
-	iov.SetLen(len(p))
+	if cerr != nil {
+		return 0, nil, cerr
+	}
 
-	msg.Iov = &iov
-	msg.Iovlen = 1
+	if rerr != nil {
+		return 0, nil, rerr
+	}
 
-	msg.Control = &ancillary[0]
-	msg.SetControllen(len(ancillary))
-
-	return 0, nil, nil
+	return nn, &Addr{sa}, nil
 }
 
-func (tc *Conn) WriteTo(p []byte, addr Addr) (n int, err error) {
+func (tc *Conn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
+	ta, ok := addr.(*Addr)
+	if !ok {
+		return 0, &net.AddrError{Err: "expected tipc.Addr", Addr: addr.String()}
+	}
+
+	cerr := tc.sc.Write(func(fd uintptr) bool {
+		err = unix.Sendto(int(fd), p, 0, ta.Sockaddr)
+		return !errors.Is(err, syscall.EAGAIN)
+	})
+
+	if cerr != nil {
+		return 0, cerr
+	}
+
+	if err != nil {
+		return 0, err
+	}
+
 	// TODO: implement.
-	return 0, nil
+	return len(p), nil
 }
 
 func (tc *Conn) Close() (err error) {
@@ -304,6 +341,11 @@ func newPacketConn(typ int, s *unix.SockaddrTIPC) (*Conn, error) {
 	}
 
 	if err := unix.SetNonblock(fd, true); err != nil {
+		unix.Close(fd)
+		return nil, err
+	}
+
+	if err := unix.Bind(fd, s); err != nil {
 		unix.Close(fd)
 		return nil, err
 	}
