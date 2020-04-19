@@ -250,7 +250,6 @@ func (tc *Conn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 		return 0, err
 	}
 
-	// TODO: implement.
 	return len(p), nil
 }
 
@@ -334,7 +333,7 @@ func DialStream(s *unix.SockaddrTIPC) (*Conn, error) {
 	return newConnectConn(unix.SOCK_STREAM, s)
 }
 
-func newPacketConn(typ int, s *unix.SockaddrTIPC) (*Conn, error) {
+func newPacketConn(typ int, s *unix.SockaddrTIPC, bind bool) (*Conn, error) {
 	fd, err := unix.Socket(unix.AF_TIPC, typ|unix.SOCK_CLOEXEC, 0)
 	if err != nil {
 		return nil, err
@@ -345,19 +344,25 @@ func newPacketConn(typ int, s *unix.SockaddrTIPC) (*Conn, error) {
 		return nil, err
 	}
 
-	if err := unix.Bind(fd, s); err != nil {
-		unix.Close(fd)
-		return nil, err
+	if bind {
+		if err := unix.Bind(fd, s); err != nil {
+			unix.Close(fd)
+			return nil, err
+		}
 	}
 
 	return newConn(fd)
 }
 
 func ListenReliableDatagram(s *unix.SockaddrTIPC) (*Conn, error) {
-	return newPacketConn(unix.SOCK_RDM, s)
+	return newPacketConn(unix.SOCK_RDM, s, true)
 }
 func ListenDatagram(s *unix.SockaddrTIPC) (*Conn, error) {
-	return newPacketConn(unix.SOCK_DGRAM, s)
+	return newPacketConn(unix.SOCK_DGRAM, s, true)
+}
+
+func ReliableDatagram() (*Conn, error) {
+	return newPacketConn(unix.SOCK_RDM, nil, false)
 }
 
 // SocketPair returns two AF_TIPC connections connected to each other through
